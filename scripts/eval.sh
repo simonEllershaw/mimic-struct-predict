@@ -52,6 +52,9 @@ uv run python mimic_struct_predict/evals/dataset_count.py
 echo "---- Error Rates ----"
 uv run python mimic_struct_predict/evals/error_rates.py
 
+echo "---- Error Cohort Analysis ----"
+uv run python mimic_struct_predict/evals/error_cohort_analysis.py
+
 echo "---- Event Config to LaTeX ----"
 uv run python mimic_struct_predict/evals/event_config_to_latex.py
 

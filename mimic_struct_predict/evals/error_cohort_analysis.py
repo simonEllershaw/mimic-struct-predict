@@ -24,6 +24,38 @@ def extract_history_length(text: str) -> int:
     return sum(1 for line in lines if not line.lstrip("/").startswith("#"))
 
 
+def assign_cohort(format_adherence: list[int]) -> str:
+    """Assigns error cohort based on format adherence across trajectories."""
+    n_traj = len(format_adherence)
+    n_errors = n_traj - sum(format_adherence)
+    if n_errors == 0:
+        return "0%"
+    if n_errors == n_traj:
+        return "100%"
+    return "5-50%" if (n_errors / n_traj <= 0.5) else "55-95%"
+
+
+def export_table(df: pl.DataFrame, name: str, title: str, output_dir: Path) -> None:
+    """Exports table to CSV, LaTeX, and Markdown formats."""
+    # 1. Save CSV
+    csv_path = output_dir / f"{name}.csv"
+    df.write_csv(csv_path)
+
+    # 2. Mask repeated modality for display formats
+    pdf = df.to_pandas()
+    pdf["Modality"] = pdf["Modality"].mask(pdf.duplicated(subset=["Modality"]), "")
+
+    # 3. Save LaTeX
+    tex_path = output_dir / f"{name}.tex"
+    tex_path.write_text(pdf.to_latex(index=False, escape=True))
+
+    # 4. Save Markdown
+    md_path = output_dir / f"{name}.md"
+    md_path.write_text(pdf.to_markdown(index=False))
+
+    log.info(f"Saved {name} (.csv, .tex, .md) to {output_dir}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate error cohorts and extract cohort analysis statistics.")
     parser.add_argument("--split", type=str, default="held_out", choices=["train", "tuning", "held_out"])
@@ -53,7 +85,8 @@ def main() -> None:
         ("Natural Language", args.nl_dir),
     ]
 
-    flat_rows = []
+    history_rows = []
+    prevalence_rows = []
 
     for mod_name, mod_dir in sources:
         log.info(f"--- Processing {mod_name} ---")
@@ -61,74 +94,52 @@ def main() -> None:
             roll_df = load_predictions(mod_dir, task, args.split)
             n_patients = len(roll_df)
 
-            # Assign cohort based on % failed trajectories
-            # 0% errors -> '0%', 5-50% errors -> '5-50%', 55-95% errors -> '55-95%', 100% errors -> '100%'
-            cohorts = []
-            for fa in roll_df["format_adherence"]:
-                n_traj = len(fa)
-                n_errors = n_traj - sum(fa)
-                pct_errors = (n_errors / n_traj * 100.0) if n_traj > 0 else 0.0
-                if n_errors == 0:
-                    cohorts.append("0%")
-                elif n_errors == n_traj:
-                    cohorts.append("100%")
-                elif pct_errors <= 50.0:
-                    cohorts.append("5-50%")
-                else:
-                    cohorts.append("55-95%")
-
-            # Extract features from decoded_input
+            cohorts = [assign_cohort(fa) for fa in roll_df["format_adherence"]]
             n_events = [extract_history_length(t) for t in roll_df["decoded_input"]]
             bool_vals = roll_df["boolean_value"].to_list()
+
+            hist_row = {"Modality": mod_name, "Task": format_task_title(task)}
+            prev_row = {"Modality": mod_name, "Task": format_task_title(task)}
 
             for cohort in COHORTS:
                 idxs = [i for i, c in enumerate(cohorts) if c == cohort]
                 cohort_n = len(idxs)
-
                 prop = (cohort_n / n_patients * 100.0) if n_patients > 0 else 0.0
 
                 c_events = [n_events[i] for i in idxs]
                 if c_events:
-                    med_events = float(np.median(c_events))
-                    q25_events = float(np.percentile(c_events, 25))
-                    q75_events = float(np.percentile(c_events, 75))
-                    hist_events_str = f"{med_events:.2f} [{q25_events:.2f}, {q75_events:.2f}]"
+                    med = float(np.median(c_events))
+                    q25 = float(np.percentile(c_events, 25))
+                    q75 = float(np.percentile(c_events, 75))
+                    hist_row[cohort] = f"{med:.2f} [{q25:.2f}, {q75:.2f}] ({prop:.2f}%)"
                 else:
-                    hist_events_str = "-"
+                    hist_row[cohort] = "-"
 
                 c_labels = [bool_vals[i] for i in idxs]
-                prev = (sum(c_labels) / cohort_n * 100.0) if cohort_n > 0 else None
+                if cohort_n > 0:
+                    prev = sum(c_labels) / cohort_n * 100.0
+                    prev_row[cohort] = f"{prev:.2f}% ({prop:.2f}%)"
+                else:
+                    prev_row[cohort] = "-"
 
-                flat_rows.append(
-                    {
-                        "Modality": mod_name,
-                        "Task": format_task_title(task),
-                        "Error Rate": cohort,
-                        "Patients, N (%)": f"{cohort_n:,} ({prop:.2f}%)",
-                        "History Length, Median [IQR] (Num Events)": hist_events_str,
-                        "Outcome Prevalence (%)": prev,
-                    }
-                )
+            history_rows.append(hist_row)
+            prevalence_rows.append(prev_row)
 
-    df = pl.DataFrame(flat_rows)
+    hist_df = pl.DataFrame(history_rows)
+    prev_df = pl.DataFrame(prevalence_rows)
 
-    # 1. Save CSV
-    csv_path = args.output_dir / "error_cohort_analysis.csv"
-    df.write_csv(csv_path)
-    log.info(f"Saved CSV table to {csv_path}")
-
-    # 2. Save LaTeX
-    tex_path = args.output_dir / "error_cohort_analysis.tex"
-    tex_path.write_text(df.to_pandas().to_latex(index=False, escape=True, float_format="%.2f"))
-    log.info(f"Saved LaTeX table to {tex_path}")
-
-    # 3. Save Markdown
-    md_df = df.to_pandas()
-    md_df["Task"] = md_df["Task"].mask(md_df.duplicated(subset=["Modality", "Task"]), "")
-    md_df["Modality"] = md_df["Modality"].mask(md_df.duplicated(subset=["Modality"]), "")
-    md_path = args.output_dir / "error_cohort_analysis.md"
-    md_path.write_text(md_df.to_markdown(index=False, floatfmt=".2f"))
-    log.info(f"Saved Markdown table to {md_path}")
+    export_table(
+        hist_df,
+        "history_length",
+        "History Length, Median [IQR] (Cohort Percentage)",
+        args.output_dir,
+    )
+    export_table(
+        prev_df,
+        "outcome_prevalence",
+        "Outcome Prevalence % (Cohort Percentage)",
+        args.output_dir,
+    )
 
 
 if __name__ == "__main__":

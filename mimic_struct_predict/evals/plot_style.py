@@ -126,7 +126,7 @@ MODALITY_STYLES: dict[str, dict[str, Any]] = {
 # ---- Error Handling Methods ----
 METHODS = {
     "probability_0": "Non-occurrence ($y_t=0$)",
-    "probability_0_5": "Uninformative ($y_t=0.5$)",
+    "probability_0_5": "Midpoint ($y_t=0.5$)",
     "probability_prevalence": "Training Prevalence",
     "probability_drop_trajectory": "Drop Trajectories",
 }
